@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Hedgehog</title>
+    <style>
+        table {
+            border: 1px solid black;
+            table-layout: fixed;
+            width: 100%;
+        }
+
+        th,
+        td {
+            overflow: hidden;
+            padding: 0.5px
+        }
+
+    </style>
+    <script src='https://unpkg.com/tesseract.js@v2.1.0/dist/tesseract.min.js'></script>
+    <script>
+        
+        let WHITE_THRESHOLD = 200;
+        let MIN_INPUT_FIELDS_FOR_INITIAL_LINE = 10;
+        let MIN_INPUT_FIELDS_PER_LINE = 3;
+        let INPUT_WIDTH_MAX_VARIATION = 0.85;
+        let INPUT_LINE_TO_NUMBER_OFFSET = 5;
+        let INPUT_NUMBER_PROPORTIONS = 1.5;
+        let FONT_SIZE_TO_INPUT_LINE_RATIO = 1;
+        let TEXT_GAP_TO_INPUT_LINE_RATIO = 0.25;
+        let MAX_CANVAS_SIZE = 1000;
+        
+        let average_input_width = 0;
+        let characters = [];
+        let inputCells = {};
+        let blankPage = null;
+        let knownMappings = {};
+        let originalWidth = 0;
+
+        let editMode = false;
+
+        // 0 - add
+        // 1 - delete
+        // 2 - table1
+        // 3 - table2
+        let editModeMode = 0;
+        let editTableCorner = null;
+        
+        const worker = Tesseract.createWorker({
+            //logger: m => console.log(m), // Add logger here
+        });
+
+        let editImage = null;
+        let closeImage = null;
+        let deleteImage = null;
+        let tableImage = null;
+        let addImage = null;
+
+        // Submit an answer
+        function submitAnswer(input) {
+            let character = input.letter.trim();
+            let number = input.number.trim();
+
+            // delete old solution
+            if (character != "") {
+                // find the number corresponding to the character
+                for (const key in knownMappings) {
+                    if (knownMappings[key] == character) {
+                        delete knownMappings[key];
+                        delete knownMappings[""+key]; // some weird edge cases sometimes prevent proper deletion
+                    }
+                }
+            }
+
+            // submit new value if provided
+            if (number != "") {
+                // filter out invalid submissions
+                let value = Number(number);
+                if (value != NaN && value >= 1 && value <= 26) {
+                    if (character.length == 1) {
+                        knownMappings[number] = character;
+                    } else {
+                        delete knownMappings[number];
+                        delete knownMappings[""+number];
+                    }
+                }
+            } 
+            return true;
+        }
+
+        // Identify all the sequences of dark pixels in a given row that don't match in a row above
+        function findLinesInRow(pixels, start, width) {
+            let consecutive_length = 0;
+            let consecutive_start = 0;
+            let lines = [];
+            for (let i = 0; i < width*4; i += 4) {
+                if (pixels[start+i] < WHITE_THRESHOLD && pixels[start+i-(width*4)] > WHITE_THRESHOLD) { 
+                    if (consecutive_length == 0) {
+                        consecutive_start = i/4;
+                    }
+                    consecutive_length++;
+                } else {
+                    if (consecutive_length > 0) {
+                        lines.push({"start": consecutive_start, "length": consecutive_length})
+                        consecutive_length = 0;
+                    }
+                }
+            }
+            return lines;
+        }
+
+        // Find the first row that is viable to contain input fields and calculate the likely average width
+        function getAverageInputWidth(pixels, start_row, width, height) {
+            let row_length = width*4;
+            
+            for (let row = start_row; row < height; row++) {
+                let lines = findLinesInRow(pixels, row*width*4, width);
+                if (lines.length > MIN_INPUT_FIELDS_FOR_INITIAL_LINE) {
+                    let MIN_INPUT_FIELDS_PER_LINE = 3
+                    let sum = 0;
+                    for (let line of lines) {
+                        sum += line.length;
+                    }
+                    let average = Math.floor(sum/lines.length);
+                    return average;
+                }
+            }
+
+            return null;
+        }
+
+        // Find all the cells on the board that need resolving
+        function getInputs(width, height, pixels) {
+            // skip header (solution table)
+            let start_row = inputCells.top + inputCells.height + 5;
+
+            average_input_width = getAverageInputWidth(pixels, start_row, width, height);
+
+            if (average_input_width === null) {
+                alert("Couldn't find a viable input line");
+                return null;
+            }
+
+            let inputs = [];
+            for (let row = start_row; row < height; row++) { 
+                let lines = findLinesInRow(pixels, row*width*4, width);
+                if (lines.length > 0) { 
+                    // Only accept lines of specific width range to avoid picking up letters
+                    let filtered_lines = lines.filter(line=> 
+                        (line.length > (average_input_width*INPUT_WIDTH_MAX_VARIATION) && 
+                        line.length < (average_input_width/INPUT_WIDTH_MAX_VARIATION))
+                    );
+                    if (filtered_lines.length > 0) {
+                        inputs.push({"row": row, "lines": filtered_lines})
+                    }
+                }
+            }
+            return inputs;
+        }
+
+        // Try to OCR the number under each recognized cell
+        async function runOCR(input, canvas) {
+            let characters = [];
+
+            await worker.load();
+            await worker.loadLanguage('eng');
+            await worker.initialize('eng');
+            await worker.setParameters({
+                tessedit_char_whitelist: '0123456789',
+            });
+            for (lines of input) {
+                let row = lines.row;
+                let row_text = "";
+                for (line of lines.lines) {
+                    let rectangle = { 
+                        left: line.start, 
+                        top: row+INPUT_LINE_TO_NUMBER_OFFSET, 
+                        width: line.length, 
+                        height: average_input_width * INPUT_NUMBER_PROPORTIONS
+                    };
+                    let { data: { text } } = await worker.recognize(canvas, {rectangle});
+                    text = text.trim();
+                    let numericalValue = Number(text);
+                    if (numericalValue == NaN || numericalValue < 1 || numericalValue > 26) {
+                        text = ""; // remove definitely invalid detections
+                    }
+                    characters.push({"inputNumber": text, "row": row, "column": line.start})
+                    row_text += text + ", ";
+                }
+            }
+            await worker.terminate();
+
+            return characters;
+        }
+
+        // fill in the known values in the answer table
+        function drawAnswersTable(context) {
+            let inputsRow = inputCells.bottom - Math.floor(inputCells.height/6);
+            context.fillStyle = "black";
+            context.textAlign = "center";
+
+            for (let i in knownMappings) {
+                let number = Number(i);
+
+                // ignore not valid mappings
+                if (number == NaN || number < 1 || number > 26) { continue; }
+                
+                let character = knownMappings[i];
+                
+                // make sure that the mapping is valid (number -> character)
+                if (character.length != 1) { continue; }
+                
+                let character_number = character.charCodeAt(0) - 0x41;
+                
+                // make sure that only values A-Z are allowed
+                if (character_number < 0 || character_number > 25) { continue; }
+
+                // calculate a center X coordinate of the number to draw
+                let x = inputCells.left + inputCells.cell_width*character_number + inputCells.cell_width*0.5;
+                context.fillText(i.toUpperCase(), x, inputsRow);
+            }
+        }
+
+        // draw all the identified input fields values
+        function drawInputFields(context) {
+            context.textAlign = "center";
+
+            for (char of characters) {
+                // get the input field's numerical value
+                let character = char.inputNumber;
+
+                if (character == "") { // if numerical value couldn't be resolved 
+                    character = "❓";
+                    context.fillStyle = "red";
+                } else if (character in knownMappings) { // if number already solved (write the solution)
+                    context.fillStyle = "black";
+                    character = knownMappings[character];
+                } else { // if the character corresponding to number is not yet known
+                    context.fillStyle = "grey"
+                }
+                // draw the text above the input field (centered)
+                context.fillText(character.toUpperCase(), char.column+average_input_width/2, char.row-(average_input_width*TEXT_GAP_TO_INPUT_LINE_RATIO));
+            }
+        }
+
+        // Render edit mode outlines and buttons
+        function renderEditMode(context) {
+            
+            // outlines for all identified input fields
+            context.strokeStyle = "red";
+            for (let character of characters) {
+                context.strokeRect(character.column, character.row - average_input_width*INPUT_NUMBER_PROPORTIONS, 
+                    average_input_width, average_input_width*INPUT_NUMBER_PROPORTIONS);
+            }
+
+            // don't draw the outline if currently setting the 2nd corner of it
+            if (editModeMode != 3) {
+                // outline around the answer table
+                context.strokeStyle = "blue";
+                context.strokeRect(inputCells.left, inputCells.top, inputCells.width, inputCells.height);
+            }
+
+            let text = "";
+            if (editModeMode == 0) { // add
+                text = "Click on where an input field is located to add one.";
+            } else if (editModeMode == 1) { // delete
+                text = "Click on an existing input field to delete it.";
+            } else if (editModeMode == 2) { // answer table corner 1
+                text = "Click on the top left corner of a new answer table.";
+            } else if (editModeMode == 3) { // answer table corner 2
+                text = "Click on the bottom right of a new answer table.";
+            }
+
+            // render the description
+            context.fillStyle = "red"
+            context.textAlign = "left";
+            context.fillText("Edit Mode: " + text, average_input_width/2, average_input_width);
+
+            // close edit mode button
+            context.drawImage(closeImage, originalWidth - average_input_width*2, average_input_width*0.5, average_input_width*1.5, average_input_width*1.5);
+            
+            // if not in delete mode
+            if (editModeMode != 1) {
+                // delete input button
+                context.drawImage(deleteImage, originalWidth - average_input_width*2, average_input_width*2.5, average_input_width*1.5, average_input_width*1.5);
+            } else {
+                // add input button
+                context.drawImage(addImage, originalWidth - average_input_width*2, average_input_width*2.5, average_input_width*1.5, average_input_width*1.5);
+            }
+            // add edit answer table button
+            context.drawImage(tableImage, originalWidth - average_input_width*2, average_input_width*4.5, average_input_width*1.5, average_input_width*1.5);
+        }
+
+        function renderNonEditMode(context) {
+            context.drawImage(editImage, originalWidth - average_input_width*2, average_input_width*0.5, average_input_width*1.5, average_input_width*1.5);
+        }
+
+        // draw the current state of the playing board
+        function redraw() {
+            let canvas = document.getElementById('gameboard');
+            let context = canvas.getContext('2d');
+
+            // clear the state to original board
+            context.putImageData(blankPage, 0, 0);
+
+            // calculate the font size
+            context.font = Math.floor(average_input_width*FONT_SIZE_TO_INPUT_LINE_RATIO)+"px monospace";
+
+            drawAnswersTable(context);
+            drawInputFields(context);
+
+            if (editMode) {
+                renderEditMode(context);
+            } else {
+                renderNonEditMode(context);
+            }
+        }
+
+        // identify pressed character box and take and submit the answer
+        function handleAnswerTableClick(x) {
+            // identify which cell has been pressed
+            let cell_number = Math.floor((x - inputCells.left)/inputCells.cell_width);
+            
+            // exclude cases where a click was outside the table
+            if (cell_number < 0 || cell_number > 25) { return; }
+
+            // get the character corresponding to the cell number
+            let character = String.fromCharCode(0x41+cell_number);
+
+            let input = prompt("Enter number for letter " + character.toUpperCase() + ". Leave empty to clear answer.");
+            if (input != null) {
+                submitAnswer({"number": input, "letter": character.toUpperCase()});
+                redraw();
+            }
+        }
+
+        // user clicked on an input cell, ask what to do
+        function requestUserInputForCell(character) {
+            if (character.inputNumber == "") { // handle cases where a cell has not been resolved to a number
+                let input = prompt("Enter number for this cell.");
+                if (input != null) {
+                    input = input.trim();
+                    let numericalValue = Number(input);
+                    if (input != "" && numericalValue != NaN && numericalValue >= 1 && numericalValue <= 26) // only allow valid numbers
+                    {
+                        character.inputNumber = input;
+                    }
+                }
+            } else { // the cell was already identified, submit guess or change what it is identified as
+                let input = prompt("Enter a letter corresponding to number "+character.inputNumber+
+                " to submit a guess, or a number if the cell was misidentified and you want to change its numerical ID.");
+                if (input != null) {
+                    input = input.toLowerCase().trim();
+                    if (input == "") {
+                        return true;
+                    }
+
+                    let numericalValue = Number(input);
+
+                    // change what the cell was identified as
+                    if (numericalValue != NaN && numericalValue >= 1 && numericalValue <= 26) // only allow valid numbers
+                    {
+                        character.inputNumber = input;
+                    } else { // submit answer for a number
+                        submitAnswer({"number": character.inputNumber, "letter": input.toUpperCase()});
+                    }
+
+                }
+            }
+            
+            redraw()
+        }
+
+        // Handle click within bounding boxes of input lines
+        function handlePotentialInputFieldClick(x, y) {
+            for (character of characters) {
+                // if click was within a bounding box of a character
+                if (((character.row - average_input_width*INPUT_NUMBER_PROPORTIONS) < y && y < character.row) &&
+                    ((character.column) < x && x < character.column + average_input_width)) 
+                {
+                    requestUserInputForCell(character)
+                    return true;
+                }
+            }
+            
+            // not within a bounding box of any input
+            return false;
+        }
+
+        // Handle clicks in edit mode
+        function handleEditModeClick(x, y) {
+            // add/delete button
+            if (average_input_width*2.5 < y && y < average_input_width*4 && (originalWidth-average_input_width*2) < x && x < (originalWidth-average_input_width*0.5) ) {
+                if (editModeMode != 1) {
+                    editModeMode = 1; // set to delete if not yet there
+                } else {
+                    editModeMode = 0; // set to add if delete
+                }
+
+                redraw();
+                return;
+            }   
+
+            // table button
+            if (average_input_width*4.5 < y && y < average_input_width*6 && (originalWidth-average_input_width*2) < x && x < (originalWidth-average_input_width*0.5) ) {
+                editModeMode = 2
+                redraw();
+                return;
+            }   
+            
+            // add
+            if (editModeMode == 0) { 
+                characters.push({"inputNumber": "", "row": y, "column": x-average_input_width/2})
+            } 
+            
+            // delete
+            else if (editModeMode == 1) { 
+                for (char in characters) {
+                    let character = characters[char]
+                    // if click was within a bounding box of a character
+                    if (((character.row - average_input_width*INPUT_NUMBER_PROPORTIONS) < y && y < character.row) &&
+                        ((character.column) < x && x < character.column + average_input_width)) 
+                    {
+                        characters.splice(char, 1)
+                        redraw();
+                        return;
+                    }
+                }
+            }
+
+            // new answer table corner 1
+            else if (editModeMode == 2) {
+                editTableCorner = {"top": y, "left": x};
+                editModeMode = 3;
+                redraw();
+                return;
+            }
+
+            // new answer table corner 2
+            else if (editModeMode == 3) {
+                inputCells = {
+                    "top": editTableCorner.top,
+                    "height": y - editTableCorner.top,
+                    "bottom": y,
+                    "left": editTableCorner.left,
+                    "width": x - editTableCorner.left,
+                    "cell_width": (x - editTableCorner.left) / 26
+                }
+                editModeMode = 1;
+                redraw();
+                return;
+            }
+
+            else {
+                alert("Something went wrong!");
+                editModeMode = 0;
+                redraw();
+                return;
+            }
+
+            redraw();
+            return;
+        }
+
+        // click event handler
+        function handleClick(e) {
+            let canvas = e.target;
+
+            // when calculating click positions take into account the scale that the canvas in rendered in
+            let width = Math.min(canvas.width, parseInt(e.target.style["max-width"]));
+            let scale = width/originalWidth;
+
+            // calculate the x and y coordinates of a click in relation to original canvas rendering size
+            let rect = e.target.getBoundingClientRect();
+            let x = (e.clientX - rect.left)/scale; //x position within the element.
+            let y = (e.clientY - rect.top)/scale;  //y position within the element.
+
+            // edit/exit edit mode button clicked
+            if (average_input_width*0.5 < y && y < average_input_width*2 && (originalWidth-average_input_width*2) < x && x < (originalWidth-average_input_width*0.5) ) {
+                editMode = !editMode;
+                editModeMode = 0;
+                redraw();
+                return;
+            }   
+
+            if (editMode) {
+                handleEditModeClick(x, y);
+                return;
+            }
+
+            // Handle click within the answer table
+            if (inputCells.top < y && y < inputCells.bottom) {
+                handleAnswerTableClick(x);
+                return;
+            }
+
+            // Handle click within bounding boxes of input lines
+            if (handlePotentialInputFieldClick(x, y)) { return; }
+
+            return;
+        }
+
+        // locate the answer table and its parameters
+        function findAnswerTable(width, height, pixels) {
+            let corner_index = 0;
+            let table_width = 0;
+            let table_height = 0;
+
+            // Iterate through the image pixels looking for a first black one (only look at the R value of RGBA) 
+            // and ensure it creates a corner rather than being a random artifact
+            for (let i = 0; i < pixels.length; i+=4) {
+                if (pixels[i] < WHITE_THRESHOLD && pixels[i+4] < WHITE_THRESHOLD && pixels[i+width*4] < WHITE_THRESHOLD) {
+                    corner_index = i;
+                    break;
+                }
+            }
+
+            // count the number of black pixels to the right of the identified one 
+            // (would break if black pixels reach the right border and continue from the left but oh well)
+            for (let i = corner_index; i < pixels.length; i += 4) {
+                if (pixels[i] < WHITE_THRESHOLD) {
+                    table_width += 1;
+                } else {
+                    break;
+                }
+            }
+
+            // calculate the number of black pixels to the bottom of the corner
+            for (let i = corner_index; i < pixels.length; i += width*4) {
+                if (pixels[i] < WHITE_THRESHOLD) {
+                    table_height += 1;
+                } else {
+                    break;
+                }
+            }
+
+            return {
+                "top": Math.floor(corner_index/4/width),
+                "height": table_height,
+                "bottom": Math.floor(corner_index/4/width) + table_height,
+                "left": corner_index/4 % width,
+                "cell_width": table_width / 26,
+                "width": table_width
+            }
+        }
+
+        function loadNavigationImages() {
+            editImage = document.getElementById("edit-icon");
+            closeImage = document.getElementById("close-icon");
+            deleteImage = document.getElementById("delete-icon");
+            tableImage = document.getElementById("table-icon");
+            addImage = document.getElementById("add-icon");
+        }
+
+        // process the loaded image to detect relevant structures
+        async function initCanvas(canvas, context, width, height) {  
+            let imageData = context.getImageData(0, 0, width, height);
+            let pixels = imageData.data;
+
+			inputCells = findAnswerTable(width, height, pixels);
+
+            let inputs = getInputs(width, height, pixels);			
+            characters = await runOCR(inputs, canvas);
+
+            // show the game board
+            document.getElementById("gameboard").style.display = "block";
+            // make sure the max width is not anything crazy
+            document.getElementById("gameboard").style.maxWidth = Math.min(innerWidth, MAX_CANVAS_SIZE)+"px";
+
+            loadNavigationImages();
+
+            // render the board
+            redraw();
+
+            // hide the loading message
+            document.getElementById('loading').style.display = "none";
+        }
+
+        function loadImage() {
+            // get the user selected file
+            let file = document.getElementById('fileSelect').files[0];
+
+            // show the loading message
+            document.getElementById('loading').style.display = "inline";
+
+            if (file) {
+                let reader = new FileReader();
+                let image = new Image();
+
+                // callback after the selected file gets loaded by the browser
+                image.onload = function() {
+                    // find the callback
+                    let canvas = document.getElementById('gameboard');
+
+                    // get the original picture width
+                    let width = image.width;
+                    let height = image.height
+
+                    // save as global for later scale calculations
+                    originalWidth = image.width;
+
+                    // set the renderer properties, those are independent from CSS
+                    canvas.width = width;
+                    canvas.height = height;
+
+                    let context = canvas.getContext('2d');
+
+                    //render the image on the canvas
+                    context.drawImage(image, 0, 0, width, height, 0, 0, width, height);
+
+                    // and save it as a blank template for later rerendering
+                    blankPage = context.getImageData(0, 0, width, height);
+
+                    // parse the image
+                    initCanvas(canvas, context, width, height);
+                }
+
+                // callback when the browser finishes loading the image file as raw bytes
+                reader.onload = function(){
+                    var dataURL = reader.result;
+
+                    // set the image object to use read data as a source (causes the callback above to get called)
+                    image.src = dataURL;
+                };
+
+                // start reading all the data
+                reader.readAsDataURL(file);
+            }
+        }
+    </script>
+</head>
+
+<body>
+    <img id="edit-icon" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAABmJLR0QAAAAAAAD5Q7t/AAAACXBIWXMAAABgAAAAYADwa0LPAAACdElEQVRo3u2YMW/TQBiG38922No0G0aVE2dCQpRurCkgBiSEVAhDpKjtH0DiH8AfoZQWFgZQhzKASBiQmBApE6ogdqiidEsaJCjE97EQKUSNYzu2z4PfzT6f73nOn85nA2nSpEkjMyQbAADOrhcKqqAdgJcZ/Kj9076P53C89FVlw+vVoqGBawCWAJwh0OX5zML5fq77EhZEogX0iplXVa4zYI41XZjPepOQJqBXzLyqce0UeF8SiiwBJcOrLvDD3D1nFLZQnjzR0p5Av9H9kL20QABKbtcRcHEuk831G71Xp05EnNDGhlHU18zrw+PDJ9YDAh5O60eg9UltsQkYG0bRcZS6wry7WM3f8CNBhE+T2mIpoX/wNQAGAA1Ed7JL2Y/H+70DADhudOsu5WSJAd368bnbkyKgV8w8Eb0FUBg5rYGoPLec2+83ul9GJH4BuDZynT1gvtJ5almT7h+pwJSlUiXg9pjE+xEJe8C8crRtN93GiGwrMVY2bjkh5tXDbXtveGJxrXBPKOqL9ubX79PGiUTAw0tqPL+ZqNzeau76HSt0AR8zP54TFnSzvdN87aeTFia8XjHzwuE3AeABoCM0PvDbKbQnEKBsRmM7Ckqdx5NXm0gFZMGHIqBXi4ZKoh4U3stSGZmAbPiZBJIAH1ggKfCBBJIE71sgafC+BJII71lgRvjWgLkUBbwngSTDTxVIOjzg8k2sV4uGAhF0exALPOCyG1VIvMP/n4GeQkDTGdDK0TPLjhreVSAIPIDWH+arccED4f5Wia1sohCQAh+WgDT4MASkws8q0FJVEcn2IA6BlqqKldZm65tM+DRp0qSRn78PjWr5+ndO9QAAACV0RVh0ZGF0ZTpjcmVhdGUAMjAyMi0wMy0yM1QwMDo0ODoxNSswMDowMEHyEaEAAAAldEVYdGRhdGU6bW9kaWZ5ADIwMjItMDMtMjNUMDA6NDg6MTUrMDA6MDAwr6kdAAAAAElFTkSuQmCC" style="display: none" />
+    <img id="close-icon" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAABmJLR0QAAAAAAAD5Q7t/AAAACXBIWXMAAABgAAAAYADwa0LPAAABrElEQVRo3u2YzU4CMRSFv8q48FngSdyZTEgEI6+GRCBRE1eueQGWre+iQOqCIdYJYqe91ZjcsyGZTNrz9Yd75oJKpVKpVKp/Ig89CzMHY+mxLdQWlms4L2bewdyBt7CVhLBQO9g48A4eu0Ccxb74CjNgBGCgB0wdDHPNOxgaWAJV86i+gKk4gIdnYBM8qjwscnbCQg3MA/N42Hl4iR3DdJ3QwIJgiz3sDEz6eyNdxwpXHg874Hawn0MeQApCynwSQC6EpPlkgFQIafNZAF0hSpjPBoiFKGVeBOAnCA9vpcyLAcC+INH6Twe2zW/72bgPDxLzigHA8Z0IJbnyRQBOQZQwDx2ihMTCmAILVuIIfbmwoVJjx68A/NUlFjlCJ1LlxMM1wik2VJU7QEyRskB4sQ30PNw5IPc4SUSJqCIlGcVFAFLiQQmInDidFA+kIVI/aLKyjSREyielSDCTgogGKBGJJSCi64CBK1oFycAoJ9sM4Am44bPgHVo2l6ljfqumsXV/aGzZpkckoaax9X5obK0E6tNRraBqunPZDa22HAwdzIuZV6lUKpVKVUAflNDwbf5r1LUAAAAldEVYdGRhdGU6Y3JlYXRlADIwMjItMDMtMjNUMDA6NDc6MzcrMDA6MDBlQ1x4AAAAJXRFWHRkYXRlOm1vZGlmeQAyMDIyLTAzLTIzVDAwOjQ3OjM3KzAwOjAwFB7kxAAAAABJRU5ErkJggg==" style="display: none" />
+    <img id="delete-icon" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAABmJLR0QAAAAAAAD5Q7t/AAAACXBIWXMAAABgAAAAYADwa0LPAAAAt0lEQVRo3u3ZMQ6CQBhE4YdcxmiBd7Ox09aryAksPAaFva0xYkvEwtAvZn9G43wHgHkkbLNgZqZU5HpQAztgm/jS/QI2XxMwZnzuiOSABvocsamWidtmU46K4AD7d6OP0ejTKPX0Gfz8P+AANQeoOUDNAWoOUHOAmgPUHKDmADUHqDlA7ZOAR9SYHu5TBJyiAgo4hgeU70uJW8D+awfr8IA5nJ9QATXQZhjeAocOVhVcAj6MmVmgF0X7GgdGSRzMAAAAJXRFWHRkYXRlOmNyZWF0ZQAyMDIyLTAzLTIzVDAwOjQ5OjIwKzAwOjAwcodS2wAAACV0RVh0ZGF0ZTptb2RpZnkAMjAyMi0wMy0yM1QwMDo0OToyMCswMDowMAPa6mcAAAAASUVORK5CYII=" style="display: none" />
+    <img id="table-icon" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAABmJLR0QAAAAAAAD5Q7t/AAAACXBIWXMAAABgAAAAYADwa0LPAAACtElEQVRo3u2YzWsTYRDGn9lN2sa2QkovWQ2UrOBRe/eolha8+C9orBUEL0qhJEtiBYtIlVZsbejRuxcvGsTeegh4LWQjRNxcqq1EU/LRjAdbmm52N0k/dje4z3F25uX3MO/HsIAnT/+3yCgoyTNhInGeGdcBDNrMVAQ4jTpPa19nNzo2IMkzYZD4BYwhm8H12gJ2L2nqk29WSUKTIxLnXQAPAEFm8XmrpCYDe9vGFSLCWMcGYP+et9LZoxjoKnkGnJavVYKmJqmdhfYlyXE+yfpW6voOeAaclqsNMGO9mw1k/LXKeLcayPiqlWv5/NOtbjTQNjxgOE53dg87CQ+4qwMdwwNtvMR2iBnrAZTHcvm5Xw1hkiKxGIiGz9DWw2x2oWxU64YOZPy1yngup4ePL4AoAeB+iYPvRkaUPqPilmfA7lkIAEKR2AMimm+MMfh9P23f1HfCDR1oFA1ffDRYH9hZAWPt0AfQRImDz/QFbjJAITn+uqfW99n/s793d6A0oTcB5k23GiApoiwSMAlgtN7DaV/F38c7NM7Ap72UlJYTZvWFbriF6JysLDH4zkEEl7nq/yCKuFrtL90QfgeihVzyJYCmN8rpDjTDH2i03ssfd8uCUMg9fmEE77QBkiLKogn8fkpmcyPwx2oRpwyQFFEWQXzPIiWlqZgEEnWrhYzOQBEN/4aOMxsZz/OKIMm8BHDUtA5YLqiJKZhsm0YZdIDTRwXWwwdQ1v1ZUwRJxjIAU3gCvSmoybbgjQ3UeRpARwOVGfzh8WAfnm9bwX9XE3fbhQcAUR8obq/9GBy68pZZOE+EMIBeO+ABrGhqsiP4f6ZPXxS6EH9FjCnzDFrVsoi2OrCOGJAi8RQItywQ2rptzHT616gVPNHqceDtMWAFf8Rt47yBE4J3xsAJwnvy5MmT8/oLRKwWtOBzTA0AAAAldEVYdGRhdGU6Y3JlYXRlADIwMjItMDMtMjNUMDA6NTA6MTgrMDA6MDDyfO9VAAAAJXRFWHRkYXRlOm1vZGlmeQAyMDIyLTAzLTIzVDAwOjUwOjE4KzAwOjAwgyFX6QAAAABJRU5ErkJggg==" style="display: none" />
+    <img id="add-icon" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAABmJLR0QAAAAAAAD5Q7t/AAAACXBIWXMAAABgAAAAYADwa0LPAAAAZElEQVRo3u3XoQ2AMBCG0cIaGCZjOCarYQ6wBFVz/CG852p6+VJzbQ0AyJmqLl629byfj72XzJqrAt4iIE1AmoA0AWkC0ob3k+duU210d/r8CwhI8x9IE5AmIE1AmoA0AQDAn118VAw2rv8bfAAAACV0RVh0ZGF0ZTpjcmVhdGUAMjAyMi0wMy0yM1QwMToxOTo0OSswMDowMI2xa0gAAAAldEVYdGRhdGU6bW9kaWZ5ADIwMjItMDMtMjNUMDE6MTk6NDkrMDA6MDD87NP0AAAAAElFTkSuQmCC" style="display: none" />
+    <canvas id="gameboard" width="0px" height="0px" style="display: none; margin: auto; max-width: 1000px;" 
+        onclick="handleClick(event)"></canvas>
+    <hr />
+    <h2>Instructions</h2>
+    <ul>
+        <li>Select the image with the challenge you want to solve: 
+            <input type="file" onchange="loadImage()" id="fileSelect">
+            <b id="loading" style="display: none; margin-left: 5px;">Loading...</b>
+        </li>
+        <li>Wait a bit for it to process (processing starts as soon as you select a file, can take a couple seconds)</li>
+        <li>Click in the answer table on top to submit a number corresponding to a given letter</li>
+        <li>Alternatively click on one of the input fields in the puzzle area to submit a guess for a letter corresponding to its number</li>
+        <br>
+        <li>If you see any errors in the automatic board recognition you can:</li>
+        <ul>
+            <li>Enter a number instead of a letter on the board to correct a misrecognised number</li>
+            <li>Press the edit button on the top right to enter edit mode, in there you can:</li>
+            <ul>
+                <li>Leave the edit mode</li>
+                <li>Add or remove the misrecognised character blanks</li>
+                <li>Relocate the answer table (the one on top)</li>
+            </ul>
+        </ul>
+    </ul>
+</body>
+</html>
