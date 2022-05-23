@@ -17,6 +17,13 @@
             overflow: hidden;
             padding: 0.5px
         }
+        #frequencies {
+          width: 20%;
+          float: left;
+        }
+        #frequencies table {
+          
+        }
 
     </style>
     <script src='https://unpkg.com/tesseract.js@v2.1.5/dist/tesseract.min.js'></script>
@@ -227,9 +234,16 @@
         function drawInputFields(context) {
             context.textAlign = "center";
 
+            var frequencies = {}
+    
             for (char of characters) {
                 // get the input field's numerical value
                 let character = char.inputNumber;
+
+                if( character != "" ){
+                  if( !frequencies[character] ) frequencies[character] = 0;
+                  frequencies[character]++;
+                }
 
                 if (character == "") { // if numerical value couldn't be resolved 
                     character = "❓";
@@ -243,6 +257,25 @@
                 // draw the text above the input field (centered)
                 context.fillText(character.toUpperCase(), char.column+average_input_width/2, char.row-(average_input_width*TEXT_GAP_TO_INPUT_LINE_RATIO));
             }
+            var f = Object.keys(frequencies).map(function(key){
+              return [key, frequencies[key]];
+            });
+            f.sort(function(a,b){
+              return b[1] - a[1];
+            });
+            buildFrequencyAnalysisTable( f );
+        }
+
+        // Draw a frequency analysis table
+        function buildFrequencyAnalysisTable( freqs ){
+          var tbl = '<table><tr><th>Number</th><th>Count</th></tr>';
+          for( var i=0; i<freqs.length; i++ ){
+            var c = freqs[i][0];
+            var f = freqs[i][1];
+            tbl += "<tr><td>" + c + "</td><td>" + f + "</td></tr>\n";
+          }
+          tbl += "</table>";
+          document.getElementById('frequencies').innerHTML = tbl;
         }
 
         // Render edit mode outlines and buttons
@@ -310,12 +343,26 @@
 
             drawAnswersTable(context);
             drawInputFields(context);
+            writeSolution();
 
             if (editMode) {
                 renderEditMode(context);
             } else {
                 renderNonEditMode(context);
             }
+        }
+
+        function writeSolution(){
+          str = '';
+          for (let c of characters) {
+            chr = knownMappings[c.inputNumber]
+            if( chr && chr != ""){
+              str += chr;
+            }else{
+              str += ' ';
+            }
+          }
+          document.getElementById('solution').innerText = str;
         }
 
         // identify pressed character box and take and submit the answer
@@ -638,8 +685,10 @@
     <img id="delete-icon" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAABmJLR0QAAAAAAAD5Q7t/AAAACXBIWXMAAABgAAAAYADwa0LPAAAAt0lEQVRo3u3ZMQ6CQBhE4YdcxmiBd7Ox09aryAksPAaFva0xYkvEwtAvZn9G43wHgHkkbLNgZqZU5HpQAztgm/jS/QI2XxMwZnzuiOSABvocsamWidtmU46K4AD7d6OP0ejTKPX0Gfz8P+AANQeoOUDNAWoOUHOAmgPUHKDmADUHqDlA7ZOAR9SYHu5TBJyiAgo4hgeU70uJW8D+awfr8IA5nJ9QATXQZhjeAocOVhVcAj6MmVmgF0X7GgdGSRzMAAAAJXRFWHRkYXRlOmNyZWF0ZQAyMDIyLTAzLTIzVDAwOjQ5OjIwKzAwOjAwcodS2wAAACV0RVh0ZGF0ZTptb2RpZnkAMjAyMi0wMy0yM1QwMDo0OToyMCswMDowMAPa6mcAAAAASUVORK5CYII=" style="display: none" />
     <img id="table-icon" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAABmJLR0QAAAAAAAD5Q7t/AAAACXBIWXMAAABgAAAAYADwa0LPAAACtElEQVRo3u2YzWsTYRDGn9lN2sa2QkovWQ2UrOBRe/eolha8+C9orBUEL0qhJEtiBYtIlVZsbejRuxcvGsTeegh4LWQjRNxcqq1EU/LRjAdbmm52N0k/dje4z3F25uX3MO/HsIAnT/+3yCgoyTNhInGeGdcBDNrMVAQ4jTpPa19nNzo2IMkzYZD4BYwhm8H12gJ2L2nqk29WSUKTIxLnXQAPAEFm8XmrpCYDe9vGFSLCWMcGYP+et9LZoxjoKnkGnJavVYKmJqmdhfYlyXE+yfpW6voOeAaclqsNMGO9mw1k/LXKeLcayPiqlWv5/NOtbjTQNjxgOE53dg87CQ+4qwMdwwNtvMR2iBnrAZTHcvm5Xw1hkiKxGIiGz9DWw2x2oWxU64YOZPy1yngup4ePL4AoAeB+iYPvRkaUPqPilmfA7lkIAEKR2AMimm+MMfh9P23f1HfCDR1oFA1ffDRYH9hZAWPt0AfQRImDz/QFbjJAITn+uqfW99n/s793d6A0oTcB5k23GiApoiwSMAlgtN7DaV/F38c7NM7Ap72UlJYTZvWFbriF6JysLDH4zkEEl7nq/yCKuFrtL90QfgeihVzyJYCmN8rpDjTDH2i03ssfd8uCUMg9fmEE77QBkiLKogn8fkpmcyPwx2oRpwyQFFEWQXzPIiWlqZgEEnWrhYzOQBEN/4aOMxsZz/OKIMm8BHDUtA5YLqiJKZhsm0YZdIDTRwXWwwdQ1v1ZUwRJxjIAU3gCvSmoybbgjQ3UeRpARwOVGfzh8WAfnm9bwX9XE3fbhQcAUR8obq/9GBy68pZZOE+EMIBeO+ABrGhqsiP4f6ZPXxS6EH9FjCnzDFrVsoi2OrCOGJAi8RQItywQ2rptzHT616gVPNHqceDtMWAFf8Rt47yBE4J3xsAJwnvy5MmT8/oLRKwWtOBzTA0AAAAldEVYdGRhdGU6Y3JlYXRlADIwMjItMDMtMjNUMDA6NTA6MTgrMDA6MDDyfO9VAAAAJXRFWHRkYXRlOm1vZGlmeQAyMDIyLTAzLTIzVDAwOjUwOjE4KzAwOjAwgyFX6QAAAABJRU5ErkJggg==" style="display: none" />
     <img id="add-icon" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAABmJLR0QAAAAAAAD5Q7t/AAAACXBIWXMAAABgAAAAYADwa0LPAAAAZElEQVRo3u3XoQ2AMBCG0cIaGCZjOCarYQ6wBFVz/CG852p6+VJzbQ0AyJmqLl629byfj72XzJqrAt4iIE1AmoA0AWkC0ob3k+duU210d/r8CwhI8x9IE5AmIE1AmoA0AQDAn118VAw2rv8bfAAAACV0RVh0ZGF0ZTpjcmVhdGUAMjAyMi0wMy0yM1QwMToxOTo0OSswMDowMI2xa0gAAAAldEVYdGRhdGU6bW9kaWZ5ADIwMjItMDMtMjNUMDE6MTk6NDkrMDA6MDD87NP0AAAAAElFTkSuQmCC" style="display: none" />
+    <div id="frequencies"></div>
     <canvas id="gameboard" width="0px" height="0px" style="display: none; margin: auto; max-width: 1000px;" 
         onclick="handleClick(event)"></canvas>
+    <div id="solution"></div>
     <hr />
     <h2>Instructions</h2>
     <ul>
