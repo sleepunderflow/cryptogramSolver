@@ -352,14 +352,33 @@
             }
         }
 
+        function characterArraySort(x, y) {
+            // all the row comparisons are done with reduced precision to account for the board sometimes having lines several pixels off
+            if (x.row > (y.row + average_input_width)) { // if in next row then default to after
+                return 1
+            }
+            if (x.row < (y.row - average_input_width)) { // if previous row then default to before
+                return -1
+            }
+            if (x.column < y.column) { // assume same row
+                return -1
+            }
+        }
+
         function writeSolution(){
           str = '';
-          for (let c of characters) {
-            chr = knownMappings[c.inputNumber]
+          for (let c in characters) {
+            chr = knownMappings[characters[c].inputNumber]
+            if (c > 0) {
+                // if column number rolled over or more than an input width apart insert space
+                if (characters[c].column < characters[c-1].column || characters[c].column > characters[c-1].column + average_input_width*1.5) {
+                    str += ' '
+                }
+            }
             if( chr && chr != ""){
-              str += chr;
+              str += chr.toLowerCase();
             }else{
-              str += ' ';
+              str += '_';
             }
           }
           document.getElementById('solution').innerText = str;
@@ -460,6 +479,7 @@
             // add
             if (editModeMode == 0) { 
                 characters.push({"inputNumber": "", "row": y, "column": x-average_input_width/2})
+                characters = characters.sort(characterArraySort);
             } 
             
             // delete
@@ -471,6 +491,7 @@
                         ((character.column) < x && x < character.column + average_input_width)) 
                     {
                         characters.splice(char, 1)
+                        characters = characters.sort(characterArraySort);
                         redraw();
                         return;
                     }
@@ -506,7 +527,7 @@
                 redraw();
                 return;
             }
-
+            characters = characters.sort(characterArraySort);
             redraw();
             return;
         }
@@ -610,6 +631,7 @@
 
             let inputs = getInputs(width, height, pixels);			
             characters = await runOCR(inputs, canvas);
+            characters = characters.sort(characterArraySort);
 
             // show the game board
             document.getElementById("gameboard").style.display = "block";
