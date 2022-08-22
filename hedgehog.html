@@ -26,7 +26,7 @@
         }
 
     </style>
-    <script src='https://unpkg.com/tesseract.js@v2.1.5/dist/tesseract.min.js'></script>
+    <script src="https://unpkg.com/tesseract.js@v3.0.2/dist/tesseract.min.js"></script>
     <script>
         
         let WHITE_THRESHOLD = 200;
@@ -168,7 +168,7 @@
         }
 
         // Try to OCR the number under each recognized cell
-        async function runOCR(input, canvas) {
+        async function runOCR(input, canvas, context) {
             let characters = [];
 
             await worker.load();
@@ -176,19 +176,49 @@
             await worker.initialize('eng');
             await worker.setParameters({
                 tessedit_char_whitelist: '0123456789',
+                tessedit_pageseg_mode: Tesseract.PSM.PSM_SINGLE_LINE
             });
+            
+            // tesseract doesn't like small input sets like individaul numbers and doesn't have enough context
+            // create for it favourable conditions by making sure that all digits are present in text being recognised
+
+            let canvasHeight = average_input_width * INPUT_NUMBER_PROPORTIONS
+            let trainingDataWidth = 6*average_input_width;
+
+            let canv = document.createElement('canvas');
+            canv.width = 8*average_input_width;
+            canv.height = canvasHeight;
+            let ctx = canv.getContext('2d');
+            ctx.strokeStyle = "black";
+            ctx.textAlign = "left";
+            ctx.font = "bold " + Math.floor(average_input_width*FONT_SIZE_TO_INPUT_LINE_RATIO*0.8)+"px sans-serif";
+            ctx.fillText("0123456789", 0, canvasHeight*0.65, trainingDataWidth);
+            let ocrData = ctx.getImageData(0, 0, trainingDataWidth, canvasHeight);
+                    
             for (lines of input) {
                 let row = lines.row;
                 let row_text = "";
                 for (line of lines.lines) {
-                    let rectangle = { 
-                        left: line.start, 
-                        top: row+INPUT_LINE_TO_NUMBER_OFFSET, 
-                        width: line.length, 
-                        height: average_input_width * INPUT_NUMBER_PROPORTIONS
-                    };
-                    let { data: { text } } = await worker.recognize(canvas, {rectangle});
+                    // prepare smaller image for OCR including the training 0123456789
+                    let data = context.getImageData(line.start, row+INPUT_LINE_TO_NUMBER_OFFSET, line.length, canvasHeight);
+                    let tempCanvas = document.createElement('canvas');
+                    tempCanvas.width = 8*average_input_width;
+                    tempCanvas.height = canvasHeight;
+                    let tempContext = tempCanvas.getContext('2d');
+                    tempContext.putImageData(ocrData, 0, 0);
+                    tempContext.putImageData(data, trainingDataWidth, 0);
+                    
+                    let { data: { text } } = await worker.recognize(
+                        tempCanvas, 
+                        {left: 0, top: 0, height: canvasHeight, width: line.length}
+                    );
+
                     text = text.trim();
+
+                    // get rid of the training data 0123456789
+                    text = text.replace(' ', '');
+                    text = text.slice(10);
+
                     let numericalValue = Number(text);
                     if (numericalValue == NaN || numericalValue < 1 || numericalValue > 26) {
                         text = ""; // remove definitely invalid detections
@@ -630,7 +660,7 @@
 			inputCells = findAnswerTable(width, height, pixels);
 
             let inputs = getInputs(width, height, pixels);			
-            characters = await runOCR(inputs, canvas);
+            characters = await runOCR(inputs, canvas, context);
             characters = characters.sort(characterArraySort);
 
             // show the game board
