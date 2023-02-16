@@ -410,6 +410,9 @@
       function resetField(field) {
         generatePlayingField(field)
         recalculateAnswerCells(field)
+        
+        for (i of $(".given-character")) i.draggable = true
+        for (i of $(".unknown-character")) i.draggable = true
       }
 
       function changeValues(field) {
